@@ -1,0 +1,163 @@
+##SystemML Jupyter Tutorial 
+
+##If you are just starting out please read the following “setting up your environment” step. 
+##If you aren’t just starting out please skip to “run SystemML”, but make sure to install SystemML first: go to http://systemml.apache.org/download.html and click on the systemml-0.10.0-incubating zip file.
+
+###Setting up your environment.
+
+##If you’re on a mac, you’ll want to install homebrew (http://brew.sh) if you haven’t already.
+##Copy and paste the following into your terminal.
+
+/usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+
+###Now install Java (need Java 8). 
+
+brew tap caskroom/cask
+brew install Caskroom/cask/java
+
+##In order to install something on homebrew all you need to do is type "brew install" followed by what you want to install. See below.
+
+###Follow-up by installing everything else you need.
+###Install Spark 1.6
+
+brew install apache-spark
+
+###Install python
+
+brew install python
+
+###Install jupyter and matplotlib and numpy.
+
+pip install jupyter matplotlib numpy
+
+###Install SystemML. 
+##Go to http://systemml.apache.org/download.html and click on the systemml-0.10.0-incubating zip (should be 2nd).
+
+##This next step is optional, but it will make your life a lot easier.
+
+##Set SPARK_ HOME and SYSTEMML_ HOME on your bash profile.
+
+#First, use vim to create/edit your bash profile. Not sure what a vim is? Check https://www.linux.com/learn/vim-101-beginners-guide-vim.
+#We are going to insert our file where Spark and SystemML is stored into our bash profile. This will make it easier to access. First type:
+
+vim .bash_profile
+
+###Now you are in your vim. First, type “i” for insert.
+
+i
+
+###Now insert Spark and SystemML. Note: /Documents is where I saved my Spark and SystemML. Be sure that your file path is accurate.
+
+export SPARK_HOME=/Users/stc/Documents/spark-1.5.1-bin-hadoop2.6
+
+export SYSTEMML_HOME=/Users/stc/Documents/systemml-0.10.0-incubating
+
+###Now type :wq to write the file and quit
+
+:wq
+
+##Make sure to open a new tab in terminal so that you make sure the changes have been made.
+###Congrats! You’ve made it to the step where we run SystemML! 
+
+##Run SystemML flawlessly.
+
+###In your browser, if you go to http://apache.github.io/incubator-systemml/spark-mlcontext-programming-guide.html#jupyter-pyspark-notebook-example---poisson-nonnegative-matrix-factorization you will see a long line of code under “Nonnegative Matrix Factorization”. 
+
+###Take a look at this page if you want to understand the code more, but we only need to use part of it. In your terminal, type:
+
+PYSPARK_DRIVER_PYTHON=jupyter PYSPARK_DRIVER_PYTHON_OPTS="notebook" $SPARK_HOME/bin/pyspark --master local[*] --driver-class-path $SYSTEMML_HOME/SystemML.jar 
+
+###Jupyter should have launched and you should now be running the jupyter notebook with Spark and SystemML! 
+###Now set up the notebook and download the data:
+
+%load_ext autoreload
+%autoreload 2
+%matplotlib inline
+
+import numpy as np
+import matplotlib.pyplot as plt
+plt.rcParams['figure.figsize'] = (10, 6)
+
+%%sh
+
+curl -O http://snap.stanford.edu/data/amazon0601.txt.gz
+gunzip amazon0601.txt.gz
+
+###Use PySpark to load the data into the Spark Data Frame
+
+import pyspark.sql.functions as F
+dataPath = "amazon0601.txt"
+
+X_train = (sc.textFile(dataPath)
+    .filter(lambda l: not l.startswith("#"))
+    .map(lambda l: l.split("\t"))
+    .map(lambda prods: (int(prods[0]), int(prods[1]), 1.0))
+    .toDF(("prod_i", "prod_j", "x_ij"))
+    .filter("prod_i < 500 AND prod_j < 500")
+    .cache())
+
+max_prod_i = X_train.select(F.max("prod_i")).first()[0]
+max_prod_j = X_train.select(F.max("prod_j")).first()[0]
+numProducts = max(max_prod_i, max_prod_j) + 1 
+print("Total number of products: {}".format(numProducts))
+
+##Create a SystemML Context Object
+
+from SystemML import MLContext
+ml = MLContext(sc)
+
+##Define a kernel for Poisson nonnegative matrix factorization (PNMF) in DML
+
+pnmf = """
+X = read($X)
+X = X+1 
+V = table(X[,1], X[,2])
+size = ifdef($size, -1)
+if(size > -1) {
+    V = V[1:size,1:size]
+}
+max_iteration = as.integer($maxiter)
+rank = as.integer($rank)
+
+n = nrow(V)
+m = ncol(V)
+range = 0.01
+W = Rand(rows=n, cols=rank, min=0, max=range, pdf="uniform")
+H = Rand(rows=rank, cols=m, min=0, max=range, pdf="uniform")
+losses = matrix(0, rows=max_iteration, cols=1)
+
+###Run PNMF
+
+i=1
+while(i <= max_iteration) {
+  
+  H = (H * (t(W) %*% (V/(W%*%H))))/t(colSums(W)) 
+  W = (W * ((V/(W%*%H)) %*% t(H)))/t(rowSums(H))
+  
+  
+  losses[i,] = -1 * (sum(V*log(W%*%H)) - as.scalar(colSums(W)%*%rowSums(H)))
+  i = i + 1;
+}
+
+write(losses, $lossout)
+write(W, $Wout)
+write(H, $Hout)
+"""
+###Execute the Algorithm 
+
+ml.reset()
+outputs = ml.executeScript(pnmf, {"X": X_train, "maxiter": 100, "rank": 10}, ["W", "H", "losses"])
+
+###Retrieve the Losses and Plot Them
+
+losses = outputs.getDF(sqlContext, "losses")
+xy = losses.sort(losses.ID).map(lambda r: (r[0], r[1])).collect()
+x, y = zip(*xy)
+plt.plot(x, y)
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('PNMF Training Loss')
+
+##Congratulations! You just ran SystemML! 
+
+###Thanks for reading! Stay tuned for updates on my life-changing app!
